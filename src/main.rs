@@ -3,29 +3,10 @@
 
 use core::panic::PanicInfo;
 
-use cortex_m::singleton;
-use cortex_m_rt::entry;
-
+use embassy_executor::Spawner;
+use embassy_rp::{pio::{Pio, InterruptHandler, Instance, StateMachine, Common, PioPin, Config, FifoJoin, ShiftConfig, ShiftDirection, Direction}, bind_interrupts, peripherals::PIO0, PeripheralRef, dma::{AnyChannel, Channel}, into_ref, Peripheral, gpio::{Output, Level}};
+use fixed::types::U24F8;
 use libm::{expf, floorf};
-use rp2040_hal as hal;
-
-use hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    dma::{single_buffer, DMAExt},
-    gpio::{FunctionPio0, Pin},
-    pac,
-    pio::{PIOBuilder, PIOExt, PinDir, PinState},
-    watchdog::Watchdog,
-    Sio,
-};
-use usb_device::class_prelude::UsbBusAllocator;
-use usbd_serial::SerialPort;
-
-#[link_section = ".boot2"]
-#[used]
-pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
-
-const EXTERNAL_CRYSTAL_FREQUENCY_HZ: u32 = 12_000_000;
 
 const LED_COUNT: usize = 60;
 
@@ -34,98 +15,84 @@ fn panic(_: &PanicInfo) -> ! {
     cortex_m::asm::udf();
 }
 
-#[entry]
-fn main() -> ! {
-    let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let sio = Sio::new(pac.SIO);
+bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => InterruptHandler<PIO0>;
+});
 
-    let clocks = init_clocks_and_plls(
-        EXTERNAL_CRYSTAL_FREQUENCY_HZ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+struct Ws2812<'d, P: Instance, const S: usize, const N: usize> {
+    dma: PeripheralRef<'d, AnyChannel>,
+    sm: StateMachine<'d, P, S>,
+}
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+impl<'d, P: Instance, const S: usize, const N: usize> Ws2812<'d, P, S, N> {
+    pub fn new(pio: &mut Common<'d, P>, mut sm: StateMachine<'d, P, S>, dma: impl Peripheral<P = impl Channel> + 'd, pin: impl PioPin) -> Self {
+        into_ref!(dma);
 
-    let pins = hal::gpio::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut pac.RESETS,
-    );
+        let ws2812_program = pio_proc::pio_asm!(
+            ".side_set 1",
+            ".wrap_target",
+            "bitloop:",
+            "    out x, 1        side 0 [4]",
+            "    jmp !x do_zero  side 1 [1]",
+            "    jmp bitloop     side 1 [2]",
+            "do_zero:",
+            "    nop             side 0 [2]",
+            ".wrap",
+        )
+        .program;
 
-    let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
-        pac.USBCTRL_REGS,
-        pac.USBCTRL_DPRAM,
-        clocks.usb_clock,
-        true,
-        &mut pac.RESETS,
-    ));
+        // let ws2812_program = pio_proc::pio_asm!(
+        //     ".side_set 1",
+        //     ".wrap_target",
+        //     "    nop side 1",
+        //     "    nop side 0",
+        //     ".wrap",
+        // ).program;
 
-    /*let mut serial = SerialPort::new(&usb_bus);
-    serial.*/
+        let mut cfg = Config::default();
 
-    let mut led_pin = pins.gpio25.into_push_pull_output();
-    let led_pin_num = led_pin.id().num;
-    let neo_pin: Pin<_, FunctionPio0, _> = pins.gpio15.into_function();
-    let neo_pin_num = neo_pin.id().num;
+        let out_pin = pio.make_pio_pin(pin);
+        cfg.set_out_pins(&[&out_pin]);
+        cfg.set_set_pins(&[&out_pin]);
 
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+        cfg.use_program(&pio.load_program(&ws2812_program), &[&out_pin]);
 
-    let neo_program = pio_proc::pio_asm!(
-        ".side_set 1",
-        ".wrap_target",
-        "bitloop:",
-        "    out x, 1        side 0 [4]",
-        "    jmp !x do_zero  side 1 [1]",
-        "    jmp bitloop     side 1 [2]",
-        "do_zero:",
-        "    nop             side 0 [2]",
-        ".wrap",
-    )
-    .program;
-    // let neo_program = pio_proc::pio_asm!(
-    //     ".side_set 1",
-    //     ".wrap_target",
-    //     "    nop side 1",
-    //     "    nop side 0",
-    //     ".wrap",
-    // ).program;
-    let installed = pio.install(&neo_program).unwrap();
-    let (mut sm, _rx, mut tx) = PIOBuilder::from_program(installed)
-        .out_shift_direction(hal::pio::ShiftDirection::Left)
-        .autopull(true)
-        .pull_threshold(24)
-        .side_set_pin_base(neo_pin_num)
-        .clock_divisor_fixed_point(15, 160)
-        .build(sm0);
-    sm.set_pindirs([(neo_pin_num, PinDir::Output)]);
-    sm.set_pins([(neo_pin_num, PinState::Low)]);
-    sm.start();
+        // 125 MHz / 8 MHz
+        cfg.clock_divider = U24F8::from_num(125) / U24F8::from_num(8);
 
-    // loop {
-    //     tx.write(0x00ff0000);
-    //     tx.write(0xff000000);
-    //     tx.write(0x0000ff00);
-    //     led_pin.set_high().unwrap();
-    //     delay.delay_ms(500);
-    //     led_pin.set_low().unwrap();
-    //     delay.delay_ms(500);
-    // }
+        cfg.fifo_join = FifoJoin::TxOnly;
+        cfg.shift_out = ShiftConfig {
+            auto_fill: true,
+            threshold: 24,
+            direction: ShiftDirection::Left,
+        };
 
-    let dma = pac.DMA.split(&mut pac.RESETS);
+        sm.set_config(&cfg);
+        sm.set_pin_dirs(Direction::Out, &[&out_pin]);
+        sm.set_enable(true);
+
+        Self {
+            dma: dma.map_into(),
+            sm,
+        }
+    }
+
+    pub async fn write(&mut self, colors: &[u32; N]) {
+        self.sm.tx().dma_push(self.dma.reborrow(), colors).await;
+    }
+}
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p: embassy_rp::Peripherals = embassy_rp::init(Default::default());
+
+    let Pio { mut common, sm0, .. } = Pio::new(p.PIO0, Irqs);
+    let mut led = Output::new(p.PIN_25, Level::Low);
+
+    let mut ws2812 = Ws2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_15);
 
     let mut values = [0f32; LED_COUNT];
-    let mut tx_buf = singleton!(: [u32; LED_COUNT] = [0; LED_COUNT]).unwrap();
-    let mut dma_ch = dma.ch0;
+    let mut tx_buf = [0; LED_COUNT];
 
     const SPEED: f32 = 0.005;
     let damping = expf(-SPEED / 8.);
@@ -168,8 +135,7 @@ fn main() -> ! {
             );
         }
 
-        let tx_transfer = single_buffer::Config::new(dma_ch, tx_buf, tx).start();
-        (dma_ch, tx_buf, tx) = tx_transfer.wait();
+        ws2812.write(&tx_buf).await;
     }
 }
 
