@@ -4,7 +4,9 @@
 use core::panic::PanicInfo;
 
 use embassy_executor::Spawner;
+use embassy_futures::{join::join, yield_now};
 use embassy_rp::{pio::{Pio, InterruptHandler, Instance, StateMachine, Common, PioPin, Config, FifoJoin, ShiftConfig, ShiftDirection, Direction}, bind_interrupts, peripherals::PIO0, PeripheralRef, dma::{AnyChannel, Channel}, into_ref, Peripheral, gpio::{Output, Level}};
+use embassy_time::Timer;
 use fixed::types::U24F8;
 use libm::{expf, floorf};
 
@@ -92,50 +94,59 @@ async fn main(_spawner: Spawner) {
     let mut ws2812 = Ws2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_15);
 
     let mut values = [0f32; LED_COUNT];
-    let mut tx_buf = [0; LED_COUNT];
+    let mut buf_a = [0; LED_COUNT];
+    let mut buf_b = [0; LED_COUNT];
+
+    let mut tx_buf = &mut buf_a;
+    let mut process_buf = &mut buf_b;
 
     const SPEED: f32 = 0.005;
     let damping = expf(-SPEED / 8.);
     let mut posf = 0.;
 
     loop {
-        posf += SPEED;
-        posf %= LED_COUNT as f32;
-        let pos = floorf(posf) as usize;
+        join(async {
+            ws2812.write(&tx_buf).await;
+            Timer::after_micros(550).await;
+        }, async {
+            posf += SPEED;
+            posf %= LED_COUNT as f32;
+            let pos = floorf(posf) as usize;
 
-        for i in 0..LED_COUNT {
-            values[i] *= damping;
-        }
+            for i in 0..LED_COUNT {
+                values[i] *= damping;
+            }
 
-        let f = posf % 1.;
-        values[pos] = values[pos].max(1. - f);
-        values[(pos + 1) % LED_COUNT] = values[(pos + 1) % LED_COUNT].max(f);
+            let f = posf % 1.;
+            values[pos] = values[pos].max(1. - f);
+            values[(pos + 1) % LED_COUNT] = values[(pos + 1) % LED_COUNT].max(f);
 
-        #[allow(dead_code)]
-        const RED: [u8; 3] = [1, 0, 0];
-        #[allow(dead_code)]
-        const GREEN: [u8; 3] = [0, 1, 0];
-        #[allow(dead_code)]
-        const BLUE: [u8; 3] = [0, 0, 1];
-        #[allow(dead_code)]
-        const MAGENTA: [u8; 3] = [1, 0, 1];
-        #[allow(dead_code)]
-        const YELLOW: [u8; 3] = [1, 1, 0];
-        #[allow(dead_code)]
-        const CYAN: [u8; 3] = [0, 1, 1];
+            #[allow(dead_code)]
+            const RED: [u8; 3] = [1, 0, 0];
+            #[allow(dead_code)]
+            const GREEN: [u8; 3] = [0, 1, 0];
+            #[allow(dead_code)]
+            const BLUE: [u8; 3] = [0, 0, 1];
+            #[allow(dead_code)]
+            const MAGENTA: [u8; 3] = [1, 0, 1];
+            #[allow(dead_code)]
+            const YELLOW: [u8; 3] = [1, 1, 0];
+            #[allow(dead_code)]
+            const CYAN: [u8; 3] = [0, 1, 1];
 
-        const COL1: [u8; 3] = RED;
-        const COL2: [u8; 3] = BLUE;
+            const COL1: [u8; 3] = RED;
+            const COL2: [u8; 3] = BLUE;
 
-        for i in 0..LED_COUNT {
-            tx_buf[i] = rgb(
-                (COL1[0] * f2i(values[i] * 255.)).max(COL2[0] * f2i(values[(i + LED_COUNT / 2) % LED_COUNT] * 255.)),
-                (COL1[1] * f2i(values[i] * 255.)).max(COL2[1] * f2i(values[(i + LED_COUNT / 2) % LED_COUNT] * 255.)),
-                (COL1[2] * f2i(values[i] * 255.)).max(COL2[2] * f2i(values[(i + LED_COUNT / 2) % LED_COUNT] * 255.)),
-            );
-        }
+            for i in 0..LED_COUNT {
+                process_buf[i] = rgb(
+                    (COL1[0] * f2i(values[i] * 255.)).max(COL2[0] * f2i(values[(i + LED_COUNT / 2) % LED_COUNT] * 255.)),
+                    (COL1[1] * f2i(values[i] * 255.)).max(COL2[1] * f2i(values[(i + LED_COUNT / 2) % LED_COUNT] * 255.)),
+                    (COL1[2] * f2i(values[i] * 255.)).max(COL2[2] * f2i(values[(i + LED_COUNT / 2) % LED_COUNT] * 255.)),
+                );
+            }
+        }).await;
 
-        ws2812.write(&tx_buf).await;
+        core::mem::swap(&mut tx_buf, &mut process_buf);
     }
 }
 
