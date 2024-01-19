@@ -24,6 +24,11 @@ embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1
 embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1210d081d3e2f70702d8248c7ef5286b", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "integrated-timers"] }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1210d081d3e2f70702d8248c7ef5286b" }
 embassy-net = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1210d081d3e2f70702d8248c7ef5286b", features = ["tcp", "dhcpv4"] }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1210d081d3e2f70702d8248c7ef5286b" }
 fixed = "1.24.0"
 cyw43 = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1210d081d3e2f70702d8248c7ef5286b" }
 cyw43-pio = { git = "https://github.com/embassy-rs/embassy", rev = "986eca1b1210d081d3e2f70702d8248c7ef5286b", features = ["overclock"] }
+static_cell = "2.0.0"
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+heapless = "0.8.0"
+embedded-io-async = "0.6.1"
